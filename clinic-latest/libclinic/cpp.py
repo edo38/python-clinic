@@ -1,7 +1,12 @@
+import dataclasses as dc
 import re
 import sys
-from collections.abc import Callable
 from typing import NoReturn
+
+from .errors import ParseError
+
+
+__all__ = ["Monitor"]
 
 
 TokenAndCondition = tuple[str, str]
@@ -15,6 +20,11 @@ def negate(condition: str) -> str:
         return condition[1:]
     return "!" + condition
 
+
+is_a_simple_defined = re.compile(r'^defined\s*\(\s*[A-Za-z0-9_]+\s*\)$').match
+
+
+@dc.dataclass(repr=False)
 class Monitor:
     """
     A simple C preprocessor that scans C source and computes, line by line,
@@ -27,25 +37,23 @@ class Monitor:
 
     Anyway this implementation seems to work well enough for the CPython sources.
     """
+    filename: str
+    _: dc.KW_ONLY
+    verbose: bool = False
 
-    is_a_simple_defined: Callable[[str], re.Match[str] | None]
-    is_a_simple_defined = re.compile(r'^defined\s*\(\s*[A-Za-z0-9_]+\s*\)$').match
-
-    def __init__(self, filename: str | None = None, *, verbose: bool = False) -> None:
+    def __post_init__(self) -> None:
         self.stack: TokenStack = []
         self.in_comment = False
         self.continuation: str | None = None
         self.line_number = 0
-        self.filename = filename
-        self.verbose = verbose
 
     def __repr__(self) -> str:
-        return ''.join((
-            '<Monitor ',
+        parts = (
             str(id(self)),
-            " line=", str(self.line_number),
-            " condition=", repr(self.condition()),
-            ">"))
+            f"line={self.line_number}",
+            f"condition={self.condition()!r}"
+        )
+        return f"<clinic.Monitor {' '.join(parts)}>"
 
     def status(self) -> str:
         return str(self.line_number).rjust(4) + ": " + self.condition()
@@ -56,22 +64,8 @@ class Monitor:
         """
         return " && ".join(condition for token, condition in self.stack)
 
-    def fail(self, *a: object) -> NoReturn:
-        if self.filename:
-            filename = " " + self.filename
-        else:
-            filename = ''
-        print("Error at" + filename, "line", self.line_number, ":")
-        print("   ", ' '.join(str(x) for x in a))
-        sys.exit(-1)
-
-    def close(self) -> None:
-        if self.stack:
-            self.fail("Ended file while still in a preprocessor conditional block!")
-
-    def write(self, s: str) -> None:
-        for line in s.split("\n"):
-            self.writeline(line)
+    def fail(self, msg: str) -> NoReturn:
+        raise ParseError(msg, filename=self.filename, lineno=self.line_number)
 
     def writeline(self, line: str) -> None:
         self.line_number += 1
@@ -79,7 +73,7 @@ class Monitor:
 
         def pop_stack() -> TokenAndCondition:
             if not self.stack:
-                self.fail("#" + token + " without matching #if / #ifdef / #ifndef!")
+                self.fail(f"#{token} without matching #if / #ifdef / #ifndef!")
             return self.stack.pop()
 
         if self.continuation:
@@ -150,9 +144,9 @@ class Monitor:
 
         if token in {'if', 'ifdef', 'ifndef', 'elif'}:
             if not condition:
-                self.fail("Invalid format for #" + token + " line: no argument!")
+                self.fail(f"Invalid format for #{token} line: no argument!")
             if token in {'if', 'elif'}:
-                if not self.is_a_simple_defined(condition):
+                if not is_a_simple_defined(condition):
                     condition = "(" + condition + ")"
                 if token == 'elif':
                     previous_token, previous_condition = pop_stack()
@@ -160,7 +154,8 @@ class Monitor:
             else:
                 fields = condition.split()
                 if len(fields) != 1:
-                    self.fail("Invalid format for #" + token + " line: should be exactly one argument!")
+                    self.fail(f"Invalid format for #{token} line: "
+                              "should be exactly one argument!")
                 symbol = fields[0]
                 condition = 'defined(' + symbol + ')'
                 if token == 'ifndef':
@@ -183,11 +178,17 @@ class Monitor:
         if self.verbose:
             print(self.status())
 
-if __name__ == '__main__':
-    for filename in sys.argv[1:]:
+
+def _main(filenames: list[str] | None = None) -> None:
+    filenames = filenames or sys.argv[1:]
+    for filename in filenames:
         with open(filename) as f:
             cpp = Monitor(filename, verbose=True)
             print()
             print(filename)
-            for line_number, line in enumerate(f.read().split('\n'), 1):
+            for line in f:
                 cpp.writeline(line)
+
+
+if __name__ == '__main__':
+    _main()
